@@ -1,3 +1,8 @@
+"""Run a trained ONNX policy and render video.
+
+    uv run python -m latent_mj.eval.tracking.mj_onnx_video --exp_name tennis_1748000000 --use_renderer
+"""
+
 import os
 import json
 

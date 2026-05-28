@@ -1,3 +1,8 @@
+"""Convert a Brax/JAX checkpoint to ONNX format.
+
+    uv run python -m latent_mj.app.brax2onnx_tracking --task G1TrackingTennis --exp_name tennis_1748000000
+"""
+
 from typing import Dict, Union, Tuple, Mapping
 import functools
 from absl import logging
