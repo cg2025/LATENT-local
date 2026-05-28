@@ -27,7 +27,7 @@ class Args:
     play_ref_motion: bool = False
     use_viewer: bool = False    # passive viewer (with display)
     use_renderer: bool = False  # renderer with video (headless mode)
-    task: str = "G1Tracking"
+    task: str = "G1TrackingTennis"
 
 
 @dataclass
