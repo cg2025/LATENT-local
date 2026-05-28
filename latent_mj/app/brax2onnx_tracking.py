@@ -49,7 +49,7 @@ def main(args: Args):
     config_path = WANDB_PATH_LOG / "track" / args.exp_name / "checkpoints" / "config.json"
     with open(config_path, "r") as f:
         config = json.load(f)
-        del config["policy_config"]["progress_fn"]
+        config["policy_config"].pop("progress_fn", None)
     env_cfg.update(config["env_config"])
     policy_config.update(config["policy_config"])
 
