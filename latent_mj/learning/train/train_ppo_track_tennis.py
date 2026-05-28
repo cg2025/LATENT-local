@@ -11,13 +11,14 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import argparse
 import functools
+import json
 import time
 
 import jax
 from absl import logging
 
 import latent_mj as lmj
-from latent_mj.constant import get_path_log
+from latent_mj.constant import WANDB_PATH_LOG
 from latent_mj.envs.g1_tracking.utils.wrapper import wrap_fn
 from latent_mj.learning.policy.ppo import train_tracking as ppo
 from brax.training.agents.ppo.networks import make_ppo_networks
@@ -27,7 +28,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="G1TrackingTennis")
     parser.add_argument("--exp_name", type=str, default="")
-    parser.add_argument("--num_envs", type=int, default=512)
+    parser.add_argument("--num_envs", type=int, default=4096)
+    parser.add_argument("--num_minibatches", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--num_updates_per_batch", type=int, default=4)
     parser.add_argument("--num_timesteps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no_wandb", action="store_true")
@@ -35,13 +39,38 @@ def main():
     args = parser.parse_args()
 
     exp_name = args.exp_name or f"tennis_{int(time.time())}"
-    ckpt_dir = get_path_log(exp_name) / "checkpoints"
+    ckpt_dir = WANDB_PATH_LOG / "track" / exp_name / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Load config and env
     task_cfg = lmj.registry.get(args.task, "tracking_config")
     env_cfg = task_cfg.env_config
     policy_cfg = task_cfg.policy_config
+
+    # Apply CLI overrides to policy_cfg before saving
+    policy_cfg.num_envs = args.num_envs
+    policy_cfg.batch_size = args.batch_size
+    policy_cfg.num_minibatches = args.num_minibatches
+    policy_cfg.num_updates_per_batch = args.num_updates_per_batch
+    if args.num_timesteps is not None:
+        policy_cfg.num_timesteps = args.num_timesteps
+
+    # Save config for eval/export scripts
+    def _to_serializable(v):
+        if hasattr(v, "to_dict"):
+            return {k2: _to_serializable(v2) for k2, v2 in v.to_dict().items()}
+        if isinstance(v, tuple):
+            return list(v)
+        return v
+
+    with open(ckpt_dir / "config.json", "w") as f:
+        json.dump({
+            "env_config": env_cfg.to_dict(),
+            "policy_config": {
+                k: _to_serializable(v) for k, v in policy_cfg.items()
+                if k not in ("progress_fn", "wrap_env_fn", "randomization_fn")
+            },
+        }, f, indent=2)
 
     EnvClass = lmj.registry.get(args.task, "tracking_train_env_class")
     env = EnvClass(config=env_cfg)
@@ -75,28 +104,15 @@ def main():
     if args.restore_exp_name:
         restore_ckpt = lmj.get_latest_ckpt(args.restore_exp_name)
 
-    num_envs = args.num_envs
-    batch_size = policy_cfg.batch_size
-    num_minibatches = policy_cfg.num_minibatches
-
-    # batch_size * num_minibatches must equal num_envs
-    # adjust num_minibatches to match
-    if batch_size * num_minibatches != num_envs:
-        num_minibatches = max(1, num_envs // batch_size)
-        # if still doesn't divide evenly, adjust batch_size too
-        if batch_size * num_minibatches != num_envs:
-            batch_size = num_envs // num_minibatches
-
     logging.info("JAX devices: %s", jax.devices())
-    logging.info("num_envs=%d  batch_size=%d  num_minibatches=%d", num_envs, batch_size, num_minibatches)
     logging.info("Starting training: exp=%s", exp_name)
 
     make_policy, params, metrics = ppo.train(
         environment=env,
         trajectory_data=trajectory_data,
-        num_timesteps=args.num_timesteps or policy_cfg.num_timesteps,
+        num_timesteps=policy_cfg.num_timesteps,
         max_devices_per_host=policy_cfg.max_devices_per_host,
-        num_envs=num_envs,
+        num_envs=policy_cfg.num_envs,
         episode_length=policy_cfg.episode_length,
         action_repeat=policy_cfg.action_repeat,
         wrap_env=True,
@@ -106,8 +122,8 @@ def main():
         entropy_cost=policy_cfg.entropy_cost,
         discounting=policy_cfg.discounting,
         unroll_length=policy_cfg.unroll_length,
-        batch_size=batch_size,
-        num_minibatches=num_minibatches,
+        batch_size=policy_cfg.batch_size,
+        num_minibatches=policy_cfg.num_minibatches,
         num_updates_per_batch=policy_cfg.num_updates_per_batch,
         normalize_observations=policy_cfg.normalize_observations,
         reward_scaling=policy_cfg.reward_scaling,
