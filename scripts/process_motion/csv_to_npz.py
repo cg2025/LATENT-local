@@ -3,8 +3,7 @@
 Usage:
     python scripts/process_motion/csv_to_npz.py \
         --csv_path /data/scratch-fast/cgoyal/g1/csv/240327/play_tennis_R_002__A533.csv \
-        --output_path storage/data/mocap/Tennis/p1/bones_tennis_001.npz \
-        --task G1TrackingTennis
+        --output_path storage/data/mocap/Tennis/p1/bones_tennis_001.npz
 """
 
 import os
@@ -13,43 +12,26 @@ import numpy as np
 import mujoco
 from tqdm import tqdm
 
-import latent_mj as lmj
 from latent_mj.envs.g1_tracking import g1_tracking_constants_tennis as consts
 
 
 # CSV columns (degrees) to  MuJoCo joint names
 CSV_JOINT_COLUMNS = [
-    "left_hip_pitch_joint_dof",
-    "left_hip_roll_joint_dof",
-    "left_hip_yaw_joint_dof",
+    "left_hip_pitch_joint_dof", "left_hip_roll_joint_dof", "left_hip_yaw_joint_dof",
     "left_knee_joint_dof",
-    "left_ankle_pitch_joint_dof",
-    "left_ankle_roll_joint_dof",
-    "right_hip_pitch_joint_dof",
-    "right_hip_roll_joint_dof",
-    "right_hip_yaw_joint_dof",
+    "left_ankle_pitch_joint_dof", "left_ankle_roll_joint_dof",
+    "right_hip_pitch_joint_dof", "right_hip_roll_joint_dof", "right_hip_yaw_joint_dof",
     "right_knee_joint_dof",
-    "right_ankle_pitch_joint_dof",
-    "right_ankle_roll_joint_dof",
-    "waist_yaw_joint_dof",
-    "waist_roll_joint_dof",
-    "waist_pitch_joint_dof",
-    "left_shoulder_pitch_joint_dof",
-    "left_shoulder_roll_joint_dof",
-    "left_shoulder_yaw_joint_dof",
+    "right_ankle_pitch_joint_dof", "right_ankle_roll_joint_dof",
+    "waist_yaw_joint_dof", "waist_roll_joint_dof", "waist_pitch_joint_dof",
+    "left_shoulder_pitch_joint_dof", "left_shoulder_roll_joint_dof", "left_shoulder_yaw_joint_dof",
     "left_elbow_joint_dof",
-    "left_wrist_roll_joint_dof",
-    "left_wrist_pitch_joint_dof",
-    "left_wrist_yaw_joint_dof",
-    "right_shoulder_pitch_joint_dof",
-    "right_shoulder_roll_joint_dof",
-    "right_shoulder_yaw_joint_dof",
+    "left_wrist_roll_joint_dof", "left_wrist_pitch_joint_dof", "left_wrist_yaw_joint_dof",
+    "right_shoulder_pitch_joint_dof", "right_shoulder_roll_joint_dof", "right_shoulder_yaw_joint_dof",
     "right_elbow_joint_dof",
-    "right_wrist_roll_joint_dof",
-    "right_wrist_pitch_joint_dof",
-    "right_wrist_yaw_joint_dof",
+    "right_wrist_roll_joint_dof", "right_wrist_pitch_joint_dof", "right_wrist_yaw_joint_dof",
 ]
-
+ 
 MUJOCO_JOINT_NAMES = consts.ACTION_JOINT_NAMES  # 29 joints
 
 
@@ -69,17 +51,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
-    parser.add_argument("--task", type=str, default="G1TrackingTennis")
     parser.add_argument("--fps", type=float, default=50.0,
                         help="Output FPS (CSV is 120fps, downsample to 50)")
     args = parser.parse_args()
 
-    # Load the environment to get the MuJoCo model
-    task_cfg = lmj.registry.get(args.task, "tracking_config")
-    env_cfg = task_cfg.env_config
-    EnvClass = lmj.registry.get(args.task, "tracking_train_env_class")
-    env = EnvClass(config=env_cfg)
-    mj_model = env._mj_model
+    # Load the base model (no racket) to match native Tennis data format (8 sites).
+    mj_model = mujoco.MjModel.from_xml_path(str(consts.FLAT_TERRAIN_WO_RACKET_XML))
     mj_data = mujoco.MjData(mj_model)
 
     # Get joint qpos addresses
@@ -183,7 +160,7 @@ def main():
         frequency=np.float64(args.fps),
         body_names=body_names,
         site_names=site_names,
-        metadata=np.array({"source": args.csv_path}, dtype=object),
+        metadata=None,
         njnt=np.int64(mj_model.njnt),
         jnt_type=mj_model.jnt_type.copy(),
         nbody=np.int64(nbody),

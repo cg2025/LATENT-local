@@ -320,6 +320,7 @@ EXCLUDED_TRACKING_LINKs = [
 ]
 
 TENNIS_P1_DATASET_ALL = [
+    "bones_tennis_001",
     "Random_001_Tennis 001",
     "Random_002_Tennis 001",
     "Random_003_Tennis 001",

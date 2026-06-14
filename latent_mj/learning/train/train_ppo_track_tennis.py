@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--exp_name", type=str, default="")
     parser.add_argument("--num_envs", type=int, default=4096)
     parser.add_argument("--num_minibatches", type=int, default=8)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--num_updates_per_batch", type=int, default=4)
     parser.add_argument("--num_timesteps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
