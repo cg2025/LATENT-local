@@ -1,7 +1,7 @@
 """Evaluate and render videos of the trained VAE student policy.
 
 Deploys the VAE student in simulation using the learnable prior P(z|s)
-for inference (no motion target needed at deployment time).
+for inference (no motion target at deployment time).
 
 Usage:
     python -m latent_mj.eval.vae.eval_vae \
@@ -50,7 +50,7 @@ def get_latest_ckpt(vae_exp_name: str):
 def load_vae_params(ckpt_path, vae):
     """Load VAE params from orbax checkpoint."""
     checkpointer = ocp.StandardCheckpointer()
-    # Create dummy params to restore into
+    # restore into
     dummy_state = jnp.zeros((1, vae.state_dim))
     dummy_priv = jnp.zeros((1, vae.privileged_dim))
     rng = jax.random.PRNGKey(0)
@@ -112,7 +112,7 @@ def main():
     task_cfg = lmj.registry.get(args.task, "tracking_config")
     env_cfg = task_cfg.env_config
 
-    # Play env for visualization (CPU, no JAX)
+    # Play env for visualization
     play_env = PlayG1TrackingTennisEnv(
         with_racket=True,
         config=env_cfg,
@@ -122,7 +122,7 @@ def main():
         exp_name=f"vae_{args.exp_name}",
     )
 
-    # Get dims from config directly
+    # Get dims from config 
     train_env_class = lmj.registry.get(args.task, "tracking_train_env_class")
     train_env = train_env_class(config=env_cfg)
     train_env.prepare_trajectory(env_cfg.reference_traj_config.name)
@@ -132,7 +132,7 @@ def main():
 
     logging.info("state_dim=%d, privileged_dim=%d, action_dim=%d", state_dim, privileged_dim, action_dim)
 
-    # ── Load VAE ──────────────────────────────────────────────────────────────
+    # Load VAE 
     vae = VAEPolicy(
         state_dim=state_dim,
         privileged_dim=privileged_dim,
@@ -157,7 +157,7 @@ def main():
                            rng=rng, deterministic=args.deterministic)[0]
         return action
 
-    # ── Optionally load teacher ───────────────────────────────────────────────
+    # load teacher 
     teacher_fn = None
     if args.teacher_exp_name:
         logging.info("Loading teacher for comparison: %s", args.teacher_exp_name)
@@ -165,7 +165,7 @@ def main():
                                   train_env.th.traj.data)
         logging.info("Teacher loaded.")
 
-    # ── Run evaluation ────────────────────────────────────────────────────────
+    #  run evlauation
     rng = jax.random.PRNGKey(args.seed)
     state = play_env.reset()
 
@@ -187,7 +187,7 @@ def main():
     if args.use_renderer:
         video_dir = f"storage/videos/vae/{args.exp_name}"
         logging.info("Videos saved to %s", video_dir)
-        # Find and report saved videos
+        # report saved videos
         import glob
         videos = glob.glob(f"{video_dir}/**/*.mp4", recursive=True)
         for v in videos:
