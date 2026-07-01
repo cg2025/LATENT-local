@@ -83,19 +83,19 @@ The motion tracker training pipeline is based on [OpenTrack](https://github.com/
 
 ### [Optional] Preprocess the motion data
 
-  If you want to train on your own motion data, you should first put the `.npz` files under `storage/data/mocap/<your_dataset_name>/UnitreeG1`. Then, you should run the following preprocess script to:
+  If you want to train on your own motion data, first place the `.npz` files under `storage/data/mocap/Tennis/p1/` and make sure they are listed in `consts.TENNIS_P1_DATASET_ALL` (in `latent_mj/envs/g1_tracking/g1_tracking_constants_tennis.py`), which is what the `G1TrackingTennis` task loads via `reference_traj_config.name`. Then run the following preprocess script to:
 
-  1. Align the frequency or the original motion data to the desired control frequency (50Hz by default).
+  1. Align the frequency of the original motion data to the desired control frequency (50Hz by default).
   2. Recalculate velocities (angular, linear, joint) and other state features based on the aligned frequency.
   
-  **Note:** The preprocess script will overwrite the original motion files.
+  **Note:** The preprocess script overwrites the original motion files **in place**. Back up `storage/data/mocap/Tennis/p1/` first if you want to keep the originals.
 
   ```shell
   # Use `num_batches` to split data into multiple batches for parallel processing on multiple GPUs. You should manually launch multiple processes on different GPUs for parallel processing.
-  python scripts/process_motion/preprocess_motion.py --task G1TrackingGeneral --num_batches XXX --smooth_start_end False
+  python scripts/process_motion/preprocess_motion.py --task G1TrackingTennis --num_batches XXX --smooth_start_end False
   
   # Or run on a single GPU without parallelism
-  python scripts/process_motion/preprocess_motion.py --task G1TrackingGeneral --num_batches 1 --smooth_start_end False
+  python scripts/process_motion/preprocess_motion.py --task G1TrackingTennis --num_batches 1 --smooth_start_end False
   ```
   
   Argument `--smooth_start_end True` can generate a natural transition motion from the default pose before the original motion.

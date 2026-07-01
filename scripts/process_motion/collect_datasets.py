@@ -1,4 +1,13 @@
-"""Collect BONES-SEED clips into concentric dataset subsets 
+"""Collect BONES-SEED clips into concentric dataset subsets
+
+The BONES-SEED G1 motions are distributed as a single archive (g1.tar.gz).
+Download and extract it ahead of time, e.g.:
+
+    tar -xzf g1.tar.gz -C /path/to/bones
+
+which yields /path/to/bones/g1/csv/<date>/<clip>.csv. Pass that root to this
+script via --bones_dir. Only the small metadata parquet is fetched over the
+network (for clip selection); individual clip CSVs are never downloaded.
 
   Dataset 0 — "latent_only":
       The 4 original LATENT tennis clips already in storage/data/mocap/Tennis/p1/
@@ -13,16 +22,17 @@
       + Advanced locomotion, jumping, sports, and dynamic whole-body motions
 
 Usage:
-    # List all datasets and their clips (dry run)
+    # List all datasets and their clips (dry run, no data needed)
     python scripts/process_motion/collect_datasets.py --dry_run
 
-    # Download and convert a specific dataset
-    python scripts/process_motion/collect_datasets.py --dataset tennis_extended
+    # Convert a specific dataset from an extracted BONES archive
+    python scripts/process_motion/collect_datasets.py --dataset tennis_extended \
+        --bones_dir /path/to/bones
 
-    # Download and convert all datasets
-    python scripts/process_motion/collect_datasets.py --dataset all
+    # Convert all datasets
+    python scripts/process_motion/collect_datasets.py --dataset all --bones_dir /path/to/bones
 
-    # Just show what BONES clips would be selected without downloading
+    # Just show what BONES clips would be selected without converting
     python scripts/process_motion/collect_datasets.py --dataset full --dry_run
 """
 
@@ -213,36 +223,6 @@ def select_bones_clips(df, dataset_cfg: dict) -> list:
     return sorted(list(selected))
 
 
-def download_and_convert_clip(filename: str, output_dir: Path, hf_token: Optional[str], date: str = "240327"):
-    """Download a BONES G1 CSV and convert to NPZ."""
-    from huggingface_hub import hf_hub_download
-
-    csv_rel_path = f"g1/csv/{date}/{filename}.csv"
-    output_path = output_dir / f"{filename}.npz"
-
-    if output_path.exists():
-        print(f"  [skip] {filename}.npz already exists")
-        return True
-
-    # Try to download individual file
-    try:
-        csv_path = hf_hub_download(
-            repo_id="bones-studio/seed",
-            filename=csv_rel_path,
-            repo_type="dataset",
-            token=hf_token,
-        )
-        print(f"  [download] {filename}.csv")
-    except Exception as e:
-        print(f"  [error] Could not download {filename}: {e}")
-        print(f"  Tip: Extract from g1.tar.gz: tar -xzf g1.tar.gz {csv_rel_path}")
-        return False
-
-    # Convert CSV to NPZ
-    convert_csv_to_npz(csv_path, str(output_path))
-    return True
-
-
 def convert_csv_to_npz(csv_path: str, output_path: str, fps: float = 50.0):
     """Convert a BONES G1 CSV to LATENT NPZ format."""
     import mujoco
@@ -386,10 +366,12 @@ def main():
     parser.add_argument("--output_dir", type=str,
                         default="storage/data/mocap",
                         help="Base output directory for NPZ files")
-    parser.add_argument("--bones_tar", type=str, default=None,
-                        help="Path to g1.tar.gz if already downloaded (faster than HF download)")
+    parser.add_argument("--bones_dir", type=str,
+                        default="/data/scratch-fast/cgoyal",
+                        help="Root of the extracted BONES g1.tar.gz "
+                             "(contains g1/csv/<date>/<clip>.csv)")
     parser.add_argument("--hf_token", type=str, default=None,
-                        help="HuggingFace token for downloading BONES data")
+                        help="HuggingFace token for downloading BONES metadata")
     parser.add_argument("--dry_run", action="store_true",
                         help="Just show what would be done without downloading")
     parser.add_argument("--date", type=str, default="240327",
@@ -419,30 +401,23 @@ def main():
         dataset_dir = output_dir / "Tennis" / "p1"
         manifest = save_dataset_manifest(dataset_name, cfg, bones_clips, dataset_dir)
 
-        # Convert BONES clips to NPZ
+        # Convert BONES clips to NPZ from the extracted archive
         if bones_clips:
             print(f"\nConverting {len(bones_clips)} BONES clips...")
+            csv_root = Path(args.bones_dir) / "g1" / "csv" / args.date
             for filename in bones_clips:
                 npz_path = dataset_dir / f"{filename}.npz"
                 if npz_path.exists():
                     print(f"  [skip] {filename}.npz already exists")
                     continue
 
-                # Try to find CSV in tar or download
-                csv_found = False
-
-                # Check if extracted already
-                extracted_csv = Path(f"/data/scratch-fast/cgoyal/g1/csv/{args.date}/{filename}.csv")
-                if extracted_csv.exists():
+                csv_path = csv_root / f"{filename}.csv"
+                if csv_path.exists():
                     print(f"  [convert] {filename}")
-                    convert_csv_to_npz(str(extracted_csv), str(npz_path))
-                    csv_found = True
-
-                if not csv_found and args.hf_token:
-                    download_and_convert_clip(filename, dataset_dir, args.hf_token, args.date)
-
-                if not csv_found and not args.hf_token:
-                    print(f"  [skip] {filename}: no CSV found. Extract from g1.tar.gz or provide --hf_token")
+                    convert_csv_to_npz(str(csv_path), str(npz_path))
+                else:
+                    print(f"  [skip] {filename}: CSV not found at {csv_path}")
+                    print(f"         Extract g1.tar.gz into --bones_dir ({args.bones_dir}) first.")
 
         print(f"\nDataset '{dataset_name}' ready!")
         print(f"To train with this dataset, update reference_traj_config.name in the env config")
