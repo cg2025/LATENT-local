@@ -1,11 +1,11 @@
 """VAE networks for online distillation with variational bottleneck.
 
-Architecture from LATENT paper Section 3.2.2:
-  - Posterior encoder E(z | s_t, s̃_{t+1}) -> N(mu, sigma)
-  - Decoder D(a | s_t, z) -> action
-  - Learnable prior P(z | s_t) -> N(mu_p, sigma_p)
+Architecture from LATENT paper:
+  - Posterior encoder E(z|s_t, s̃_{t+1}) --> N(mu, sigma)
+  - Decoder D(a|s_t, z) --> action
+  - Learnable prior P(z|s_t) --> N(mu_p, sigma_p)
 
-Where:
+Variables:
   s_t = current state (151 dims)
   s̃_{t+1} = privileged state / motion target (572 dims)
   z = latent code (latent_dim dims, default 32)
@@ -19,7 +19,7 @@ from typing import Sequence, Tuple
 
 
 def make_mlp(hidden_sizes: Sequence[int], activate_final: bool = False):
-    """Build a simple MLP with SiLU activations."""
+    """Build a simple MLP with Sigmoid LU activations."""
     layers = []
     for i, size in enumerate(hidden_sizes):
         layers.append(nn.Dense(size))
@@ -29,11 +29,11 @@ def make_mlp(hidden_sizes: Sequence[int], activate_final: bool = False):
 
 
 class PosteriorEncoder(nn.Module):
-    """Encodes (state, motion_target) -> (mu, log_sigma) of posterior q(z|s, s̃).
+    """Encoding (state, motion_target) to (mu, log_sigma) of posterior q(z|s, s̃).
 
     Inputs:
-        state: (batch, state_dim) — current policy observation
-        motion_target: (batch, privileged_dim) — privileged state (motion reference info)
+        state: (batch, state_dim) which is the current policy observation
+        motion_target: (batch, privileged_dim) which is the "privileged" state (motion reference info)
     Outputs:
         mu: (batch, latent_dim)
         log_sigma: (batch, latent_dim)
@@ -54,11 +54,11 @@ class PosteriorEncoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Decodes (state, latent_code) -> action.
+    """Decodes (state, latent_code) to action.
 
     Inputs:
-        state: (batch, state_dim) — current policy observation
-        z: (batch, latent_dim) — sampled latent code
+        state: (batch, state_dim) which is current policy observation
+        z: (batch, latent_dim) which is sampled latent code
     Outputs:
         action: (batch, action_dim)
     """
@@ -78,8 +78,8 @@ class Decoder(nn.Module):
 class LearnablePrior(nn.Module):
     """State-conditioned prior P(z|s) = N(mu_p(s), sigma_p(s)).
 
-    Unlike a fixed N(0,I) prior, this captures state-dependent action distributions
-    (e.g. lateral shuffle vs racket-swinging have different latent distributions).
+    We don't have fixed N(0,I) prior but rather we capture state-dependent action distributions
+    (ex: lateral shuffle vs racket-swinging have different latent distributions).
 
     Inputs:
         state: (batch, state_dim)
@@ -105,8 +105,8 @@ class LearnablePrior(nn.Module):
 class VAEPolicy(nn.Module):
     """Full VAE policy combining encoder, decoder, and prior.
 
-    At training time: encode (s, s̃) -> z, decode z -> a, compute KL with prior
-    At inference time: sample z from prior P(z|s), decode -> a
+    At training time: we encode (s, s̃) -> z, decode z -> a, compute KL with prior
+    At inference time: we sample z from prior P(z|s), decode -> a
     """
     state_dim: int = 151
     privileged_dim: int = 572
@@ -145,12 +145,7 @@ class VAEPolicy(nn.Module):
     def __call__(self, state: jnp.ndarray, motion_target: jnp.ndarray, rng: jax.Array, deterministic: bool = False):
         """Full forward pass for training.
 
-        Returns:
-            action: reconstructed action
-            mu: posterior mean
-            log_sigma: posterior log std
-            mu_prior: prior mean
-            log_sigma_prior: prior log std
+        We return action (reconstructed action), mu (posterior mean), log_sigma (posterior log std), mu_prior (prior mean), log_sigma_prior (prior log std)
         """
         mu, log_sigma = self.encoder(state, motion_target)
         mu_prior, log_sigma_prior = self.prior(state)
@@ -165,8 +160,7 @@ class VAEPolicy(nn.Module):
         return action, mu, log_sigma, mu_prior, log_sigma_prior
 
     def inference(self, state: jnp.ndarray, rng: jax.Array, deterministic: bool = False):
-        """Inference-time forward pass: sample z from prior P(z|s) -> action.
-        Used at deployment time when motion target is not available.
+        """Inference-time forward pass: sample z from prior P(z|s) as action and use at deployment time when motion target is not available.
         """
         mu_prior, log_sigma_prior = self.prior(state)
         if deterministic:
@@ -179,9 +173,7 @@ class VAEPolicy(nn.Module):
 
 
 def kl_divergence(mu_q, log_sigma_q, mu_p, log_sigma_p):
-    """KL divergence between two diagonal Gaussians.
-
-    KL(N(mu_q, sigma_q) || N(mu_p, sigma_p))
+    """KL divergence between two diagonal Gaussians. KL(N(mu_q, sigma_q) || N(mu_p, sigma_p))
     """
     sigma_q = jnp.exp(log_sigma_q)
     sigma_p = jnp.exp(log_sigma_p)
@@ -196,7 +188,6 @@ def kl_divergence(mu_q, log_sigma_q, mu_p, log_sigma_p):
 def vae_loss(action_pred, action_teacher, mu, log_sigma, mu_prior, log_sigma_prior,
              lambda_action=1.0, lambda_kl=0.01):
     """Total VAE loss = lambda_action * L_action + lambda_kl * L_KL.
-
     L_action: MSE between student decoded action and teacher action
     L_KL: KL divergence between posterior q(z|s,s̃) and prior p(z|s)
     """
