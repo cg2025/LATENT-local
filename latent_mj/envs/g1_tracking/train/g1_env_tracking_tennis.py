@@ -154,6 +154,19 @@ def g1_tracking_tennis_task_config() -> config_dict.ConfigDict:
             "joint_vel",
             "last_motor_targets"
         ],
+        # Proprioception only (no reference/dif) -> VAE prior + decoder input.
+        proprio_obs_keys=[
+            "gvec_pelvis",
+            "gyro_pelvis",
+            "joint_pos",
+            "joint_vel",
+            "last_motor_targets",
+        ],
+        # Reference difference targets (the withheld future) -> VAE encoder second input.
+        dif_obs_keys=[
+            "dif_joint_pos",
+            "dif_joint_vel",
+        ],
         privileged_obs_keys=[
             "dif_feet_height",
             "dif_joint_pos",
@@ -581,6 +594,7 @@ class G1TrackingTennisEnv(g1_base.G1Env):
 
             obs["state"] = jp.concatenate([obs["state"], info["previous_obs"].flatten()], axis=0)
             obs["privileged_state"] = jp.concatenate([obs["privileged_state"], info["previous_obs"].flatten()], axis=0)
+            obs["proprio_state"] = jp.concatenate([obs["proprio_state"], info["previous_obs"].flatten()], axis=0)
             info["previous_obs"] = jp.concatenate([info["previous_obs"][1:], history[None, :]], axis=0)
 
         reward, done = jp.zeros(2)
@@ -700,6 +714,9 @@ class G1TrackingTennisEnv(g1_base.G1Env):
             obs["state"] = jp.concatenate([obs["state"], state.info["previous_obs"].flatten()], axis=0)
             obs["privileged_state"] = jp.concatenate(
                 [obs["privileged_state"], state.info["previous_obs"].flatten()], axis=0
+            )
+            obs["proprio_state"] = jp.concatenate(
+                [obs["proprio_state"], state.info["previous_obs"].flatten()], axis=0
             )
             state.info["previous_obs"] = jp.concatenate([state.info["previous_obs"][1:], history[None, :]], axis=0)
 
@@ -1084,14 +1101,23 @@ class G1TrackingTennisEnv(g1_base.G1Env):
 
         state = jp.hstack([state_dict[k] for k in self._config.obs_keys])
         privileged_state = jp.hstack([privileged_state_dict[k] for k in self._config.privileged_obs_keys])
+        proprio_state = jp.hstack([state_dict[k] for k in self._config.proprio_obs_keys])
+        dif_state = jp.hstack([state_dict[k] for k in self._config.dif_obs_keys])
         current_history = jp.hstack([state_dict[k] for k in self._config.history_keys])
 
         # Nan to 0
         state = jp.nan_to_num(state)
         privileged_state = jp.nan_to_num(privileged_state)
+        proprio_state = jp.nan_to_num(proprio_state)
+        dif_state = jp.nan_to_num(dif_state)
         current_history = jp.nan_to_num(current_history)
 
-        return {"state": state, "privileged_state": privileged_state}, current_history
+        return {
+            "state": state,
+            "privileged_state": privileged_state,
+            "proprio_state": proprio_state,
+            "dif_state": dif_state,
+        }, current_history
 
     def _get_reward(
         self,

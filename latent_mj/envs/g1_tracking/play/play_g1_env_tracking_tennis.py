@@ -43,6 +43,7 @@ class PlayG1TrackingTennisEnv:
         use_viewer=False,
         use_renderer=False,
         exp_name="debug",
+        video_subdir="track",
     ):
         xml_path = consts.task_to_xml(with_racket=with_racket)
         if not isinstance(xml_path, str):
@@ -60,6 +61,7 @@ class PlayG1TrackingTennisEnv:
         self.use_renderer = use_renderer
         self.current_traj_info = None
         self.exp_name = exp_name
+        self.video_subdir = video_subdir
 
         if self.use_viewer:
             import mujoco.viewer as viewer
@@ -72,7 +74,7 @@ class PlayG1TrackingTennisEnv:
             self.renderer.update_scene(self.mj_data)
             self.ref_renderer.update_scene(self.ref_mj_data)
             self.writer = None
-            os.makedirs(f"storage/videos/track/{self.exp_name}", exist_ok=True)
+            os.makedirs(f"storage/videos/{self.video_subdir}/{self.exp_name}", exist_ok=True)
 
         self._config = config
         self.dt = dt
@@ -243,10 +245,10 @@ class PlayG1TrackingTennisEnv:
             self.viewer.sync()
 
         if self.use_renderer:
-            os.makedirs(f"storage/videos/track/{self.exp_name}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][0]}", exist_ok=True)
+            os.makedirs(f"storage/videos/{self.video_subdir}/{self.exp_name}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][0]}", exist_ok=True)
 
             self.writer = imageio.get_writer(
-                f"storage/videos/track/{self.exp_name}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][0]}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][1]}.mp4",
+                f"storage/videos/{self.video_subdir}/{self.exp_name}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][0]}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][1]}.mp4",
                 fps=50,
             )
 
@@ -297,6 +299,7 @@ class PlayG1TrackingTennisEnv:
             info["previous_obs"] = np.stack([init_history] * self._config.history_len, axis=0)
             obs["state"] = np.concatenate([obs["state"], info["previous_obs"].flatten()], axis=0)
             obs["privileged_state"] = np.concatenate([obs["privileged_state"], info["previous_obs"].flatten()], axis=0)
+            obs["proprio_state"] = np.concatenate([obs["proprio_state"], info["previous_obs"].flatten()], axis=0)
             info["previous_obs"] = np.concatenate([info["previous_obs"][1:], history[None, :]], axis=0)
 
         return obs, info
@@ -423,9 +426,9 @@ class PlayG1TrackingTennisEnv:
 
             if self.use_renderer and self.writer is not None:
                 self.writer.close()
-                os.makedirs(f"storage/videos/track/{self.exp_name}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][0]}", exist_ok=True)
+                os.makedirs(f"storage/videos/{self.video_subdir}/{self.exp_name}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][0]}", exist_ok=True)
                 self.writer = imageio.get_writer(
-                    f"storage/videos/track/{self.exp_name}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][0]}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][1]}.mp4",
+                    f"storage/videos/{self.video_subdir}/{self.exp_name}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][0]}/{self.ref_traj_names[self.current_traj_info.traj_state.traj_no][1]}.mp4",
                     fps=50,
                 )
         else:
@@ -438,6 +441,9 @@ class PlayG1TrackingTennisEnv:
                 obs["state"] = np.concatenate([obs["state"], state.info["previous_obs"].flatten()], axis=0)
                 obs["privileged_state"] = np.concatenate(
                     [obs["privileged_state"], state.info["previous_obs"].flatten()], axis=0
+                )
+                obs["proprio_state"] = np.concatenate(
+                    [obs["proprio_state"], state.info["previous_obs"].flatten()], axis=0
                 )
                 state.info["previous_obs"] = np.concatenate([state.info["previous_obs"][1:], history[None, :]], axis=0)
 
@@ -484,9 +490,16 @@ class PlayG1TrackingTennisEnv:
         }
 
         state = np.hstack([state_dict[k] for k in self._config.obs_keys])
+        proprio_state = np.hstack([state_dict[k] for k in self._config.proprio_obs_keys])
+        dif_state = np.hstack([state_dict[k] for k in self._config.dif_obs_keys])
         history = np.hstack([state_dict[k] for k in self._config.history_keys])
 
-        return {"state": state, "privileged_state": None}, history
+        return {
+            "state": state,
+            "privileged_state": None,
+            "proprio_state": proprio_state,
+            "dif_state": dif_state,
+        }, history
 
     def load_trajectory(self, traj: Trajectory = None, warn: bool = True) -> None:
         th_params = self._th_params if self._th_params is not None else {}

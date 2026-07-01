@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--num_updates_per_batch", type=int, default=4)
     parser.add_argument("--num_timesteps", type=int, default=None)
+    parser.add_argument("--num_evals", type=int, default=None,
+                        help="Number of evals (periodic checkpoints + reward logging)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no_wandb", action="store_true")
     parser.add_argument("--restore_exp_name", type=str, default=None)
@@ -54,6 +56,8 @@ def main():
     policy_cfg.num_updates_per_batch = args.num_updates_per_batch
     if args.num_timesteps is not None:
         policy_cfg.num_timesteps = args.num_timesteps
+    if args.num_evals is not None:
+        policy_cfg.num_evals = args.num_evals
 
     # Save config for eval/export scripts
     def _to_serializable(v):

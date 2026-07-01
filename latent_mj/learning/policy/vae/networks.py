@@ -1,13 +1,14 @@
 """VAE networks for online distillation with variational bottleneck.
 
-Architecture from LATENT paper:
-  - Posterior encoder E(z|s_t, s̃_{t+1}) --> N(mu, sigma)
-  - Decoder D(a|s_t, z) --> action
-  - Learnable prior P(z|s_t) --> N(mu_p, sigma_p)
+Architecture from LATENT paper. The reference/future target is given ONLY to the
+encoder, so the latent z is forced to carry it (prior/decoder see proprioception only):
+  - Posterior encoder E(z | proprio_t, dif_t) --> N(mu, sigma)
+  - Decoder D(a | proprio_t, z) --> action
+  - Learnable prior P(z | proprio_t) --> N(mu_p, sigma_p)
 
 Variables:
-  s_t = current state (151 dims)
-  s̃_{t+1} = privileged state / motion target (572 dims)
+  proprio_t = proprioception only, no reference (VAE prior + decoder input)
+  dif_t = reference difference targets (q^r_{t+1} - q_t), the withheld future (encoder input)
   z = latent code (latent_dim dims, default 32)
   a = action (26 dims)
 """
@@ -19,11 +20,11 @@ from typing import Sequence, Tuple
 
 
 class PosteriorEncoder(nn.Module):
-    """Encoding (state, motion_target) to (mu, log_sigma) of posterior q(z|s, s̃).
+    """Encoding (proprio, dif) to (mu, log_sigma) of posterior q(z | proprio, dif).
 
     Inputs:
-        state: (batch, state_dim) which is the current policy observation
-        motion_target: (batch, privileged_dim) which is the "privileged" state (motion reference info)
+        proprio: (batch, proprio_dim) proprioception only (no reference)
+        dif: (batch, dif_dim) reference difference targets (the withheld future)
     Outputs:
         mu: (batch, latent_dim)
         log_sigma: (batch, latent_dim)
@@ -32,8 +33,8 @@ class PosteriorEncoder(nn.Module):
     latent_dim: int = 32
 
     @nn.compact
-    def __call__(self, state: jnp.ndarray, motion_target: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        x = jnp.concatenate([state, motion_target], axis=-1)
+    def __call__(self, proprio: jnp.ndarray, dif: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        x = jnp.concatenate([proprio, dif], axis=-1)
         for size in self.hidden_sizes:
             x = nn.Dense(size)(x)
             x = nn.silu(x)
@@ -95,11 +96,15 @@ class LearnablePrior(nn.Module):
 class VAEPolicy(nn.Module):
     """Full VAE policy combining encoder, decoder, and prior.
 
-    At training time: we encode (s, s̃) -> z, decode z -> a, compute KL with prior
-    At inference time: we sample z from prior P(z|s), decode -> a
+    Inputs are split so the latent z carries the withheld future:
+      - proprio: proprioception only (no reference) -> prior + decoder
+      - dif: reference difference targets (the future) -> encoder second input
+
+    At training time: encode (proprio, dif) -> z, decode (proprio, z) -> a, KL vs prior.
+    At inference time: sample z from prior P(z|proprio), decode (proprio, z) -> a.
     """
-    state_dim: int = 151
-    privileged_dim: int = 572
+    proprio_dim: int = 74
+    dif_dim: int = 54
     action_dim: int = 26
     latent_dim: int = 32
     encoder_hidden: Sequence[int] = (512, 256)
@@ -120,25 +125,25 @@ class VAEPolicy(nn.Module):
             latent_dim=self.latent_dim,
         )
 
-    def encode(self, state: jnp.ndarray, motion_target: jnp.ndarray):
-        """Posterior encode (s, s̃) -> (mu, log_sigma)."""
-        return self.encoder(state, motion_target)
+    def encode(self, proprio: jnp.ndarray, dif: jnp.ndarray):
+        """Posterior encode (proprio, dif) -> (mu, log_sigma)."""
+        return self.encoder(proprio, dif)
 
-    def decode(self, state: jnp.ndarray, z: jnp.ndarray):
-        """Decode (s, z) -> action."""
-        return self.decoder(state, z)
+    def decode(self, proprio: jnp.ndarray, z: jnp.ndarray):
+        """Decode (proprio, z) -> action."""
+        return self.decoder(proprio, z)
 
-    def prior_params(self, state: jnp.ndarray):
-        """Prior P(z|s) -> (mu_prior, log_sigma_prior)."""
-        return self.prior(state)
+    def prior_params(self, proprio: jnp.ndarray):
+        """Prior P(z|proprio) -> (mu_prior, log_sigma_prior)."""
+        return self.prior(proprio)
 
-    def __call__(self, state: jnp.ndarray, motion_target: jnp.ndarray, rng: jax.Array, deterministic: bool = False):
-        """Full forward pass for training.
+    def __call__(self, proprio: jnp.ndarray, dif: jnp.ndarray, rng: jax.Array, deterministic: bool = False):
+        """Full forward pass for training (posterior path).
 
-        We return action (reconstructed action), mu (posterior mean), log_sigma (posterior log std), mu_prior (prior mean), log_sigma_prior (prior log std)
+        Returns action (reconstructed), mu/log_sigma (posterior), mu_prior/log_sigma_prior (prior).
         """
-        mu, log_sigma = self.encoder(state, motion_target)
-        mu_prior, log_sigma_prior = self.prior(state)
+        mu, log_sigma = self.encoder(proprio, dif)
+        mu_prior, log_sigma_prior = self.prior(proprio)
 
         if deterministic:
             z = mu
@@ -146,19 +151,18 @@ class VAEPolicy(nn.Module):
             eps = jax.random.normal(rng, shape=mu.shape)
             z = mu + jnp.exp(log_sigma) * eps
 
-        action = self.decoder(state, z)
+        action = self.decoder(proprio, z)
         return action, mu, log_sigma, mu_prior, log_sigma_prior
 
-    def inference(self, state: jnp.ndarray, rng: jax.Array, deterministic: bool = False):
-        """Inference-time forward pass: sample z from prior P(z|s) as action and use at deployment time when motion target is not available.
-        """
-        mu_prior, log_sigma_prior = self.prior(state)
+    def inference(self, proprio: jnp.ndarray, rng: jax.Array, deterministic: bool = False):
+        """Deployment forward pass: sample z from prior P(z|proprio), decode (no reference needed)."""
+        mu_prior, log_sigma_prior = self.prior(proprio)
         if deterministic:
             z = mu_prior
         else:
             eps = jax.random.normal(rng, shape=mu_prior.shape)
             z = mu_prior + jnp.exp(log_sigma_prior) * eps
-        action = self.decoder(state, z)
+        action = self.decoder(proprio, z)
         return action
 
 

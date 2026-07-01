@@ -47,36 +47,42 @@ from brax.training.agents.ppo.networks import make_ppo_networks
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DAggerBuffer:
-    """Simple FIFO replay buffer for DAgger distillation data."""
+    """Simple FIFO replay buffer for DAgger distillation data.
 
-    def __init__(self, max_size: int, state_dim: int, privileged_dim: int, action_dim: int):
+    Stores (proprio, dif, teacher_action) per transition:
+      - proprio: proprioception -> VAE prior + decoder
+      - dif: reference difference targets -> VAE encoder second input
+      - teacher_action: label from the teacher actor (queried on full state)
+    """
+
+    def __init__(self, max_size: int, proprio_dim: int, dif_dim: int, action_dim: int):
         self.max_size = max_size
-        self.state_dim = state_dim
-        self.privileged_dim = privileged_dim
+        self.proprio_dim = proprio_dim
+        self.dif_dim = dif_dim
         self.action_dim = action_dim
-        self._states = np.zeros((max_size, state_dim), dtype=np.float32)
-        self._privileged = np.zeros((max_size, privileged_dim), dtype=np.float32)
+        self._proprio = np.zeros((max_size, proprio_dim), dtype=np.float32)
+        self._dif = np.zeros((max_size, dif_dim), dtype=np.float32)
         self._teacher_actions = np.zeros((max_size, action_dim), dtype=np.float32)
         self._ptr = 0
         self._size = 0
 
-    def add(self, states, privileged, teacher_actions):
+    def add(self, proprio, dif, teacher_actions):
         """Add batch of transitions."""
-        n = states.shape[0]
+        n = proprio.shape[0]
         if self._ptr + n > self.max_size:
             # Wrap around
             end = self.max_size - self._ptr
-            self._states[self._ptr:] = states[:end]
-            self._privileged[self._ptr:] = privileged[:end]
+            self._proprio[self._ptr:] = proprio[:end]
+            self._dif[self._ptr:] = dif[:end]
             self._teacher_actions[self._ptr:] = teacher_actions[:end]
             remainder = n - end
-            self._states[:remainder] = states[end:]
-            self._privileged[:remainder] = privileged[end:]
+            self._proprio[:remainder] = proprio[end:]
+            self._dif[:remainder] = dif[end:]
             self._teacher_actions[:remainder] = teacher_actions[end:]
             self._ptr = remainder
         else:
-            self._states[self._ptr:self._ptr+n] = states
-            self._privileged[self._ptr:self._ptr+n] = privileged
+            self._proprio[self._ptr:self._ptr+n] = proprio
+            self._dif[self._ptr:self._ptr+n] = dif
             self._teacher_actions[self._ptr:self._ptr+n] = teacher_actions
             self._ptr = (self._ptr + n) % self.max_size
         self._size = min(self._size + n, self.max_size)
@@ -85,8 +91,8 @@ class DAggerBuffer:
         """Sample a random batch."""
         idx = np.random.randint(0, self._size, size=batch_size)
         return (
-            self._states[idx],
-            self._privileged[idx],
+            self._proprio[idx],
+            self._dif[idx],
             self._teacher_actions[idx],
         )
 
@@ -141,11 +147,11 @@ def setup_environment(args):
     trajectory_data = env.prepare_trajectory(env_cfg.reference_traj_config.name)
 
     dims = (
-        env.observation_size["state"][0],
-        env.observation_size["privileged_state"][0],
+        env.observation_size["proprio_state"][0],
+        env.observation_size["dif_state"][0],
         env.action_size,
     )
-    logging.info("state_dim=%d, privileged_dim=%d, action_dim=%d, latent_dim=%d",
+    logging.info("proprio_dim=%d, dif_dim=%d, action_dim=%d, latent_dim=%d",
                  dims[0], dims[1], dims[2], args.latent_dim)
     return env, trajectory_data, task_cfg, policy_cfg, dims
 
@@ -185,10 +191,10 @@ def load_teacher(env, trajectory_data, task_cfg, policy_cfg, args):
 
 def build_student(dims, args, rng):
     """Construct the VAE policy and initialize its parameters."""
-    state_dim, privileged_dim, action_dim = dims
+    proprio_dim, dif_dim, action_dim = dims
     vae = VAEPolicy(
-        state_dim=state_dim,
-        privileged_dim=privileged_dim,
+        proprio_dim=proprio_dim,
+        dif_dim=dif_dim,
         action_dim=action_dim,
         latent_dim=args.latent_dim,
         encoder_hidden=(512, 256),
@@ -196,9 +202,9 @@ def build_student(dims, args, rng):
         prior_hidden=(256, 128),
     )
     rng, param_rng, sample_rng = jax.random.split(rng, 3)
-    dummy_state = jnp.zeros((1, state_dim))
-    dummy_privileged = jnp.zeros((1, privileged_dim))
-    vae_params = vae.init(param_rng, dummy_state, dummy_privileged, sample_rng)
+    dummy_proprio = jnp.zeros((1, proprio_dim))
+    dummy_dif = jnp.zeros((1, dif_dim))
+    vae_params = vae.init(param_rng, dummy_proprio, dummy_dif, sample_rng)
     logging.info("VAE initialized. Param count: %d",
                  sum(x.size for x in jax.tree_util.tree_leaves(vae_params)))
     return vae, vae_params, rng
@@ -216,10 +222,10 @@ def make_optimizer(vae_params, learning_rate):
 def make_train_step(vae, optimizer, lambda_action, lambda_kl):
     """Build a jitted single VAE gradient-update step."""
     @jax.jit
-    def train_step(params, opt_state, states, privileged, teacher_actions, rng):
+    def train_step(params, opt_state, proprio, dif, teacher_actions, rng):
         def loss_fn(params):
             action_pred, mu, log_sigma, mu_prior, log_sigma_prior = vae.apply(
-                params, states, privileged, rng
+                params, proprio, dif, rng
             )
             total, l_action, l_kl = vae_loss(
                 action_pred, teacher_actions,
@@ -245,19 +251,27 @@ def make_inference_fns(vae, teacher_inference_fn):
         return action
 
     @jax.jit
-    def get_student_action(params, states, rng):
-        # Deployment policy: sample z from the learnable prior P(z|s).
-        return vae.apply(params, states, rng, method=VAEPolicy.inference)
+    def get_student_action(params, proprio, dif, rng):
+        action, *_ = vae.apply(params, proprio, dif, rng)
+        return action
 
     return get_teacher_action, get_student_action
 
 
 def save_checkpoint(ckpt_dir, tag, params):
-    """Save params under ckpt_dir/tag with orbax."""
+    """Save params under ckpt_dir/tag with orbax, waiting for finalization.
+
+    orbax finalizes (metadata commit + tmp->final rename) on a background thread,
+    so we must block until it completes; otherwise interpreter shutdown after the
+    final save kills the thread and leaves an unfinalized *.orbax-checkpoint-tmp-* dir.
+    """
     import orbax.checkpoint as ocp
     ckpt_path = ckpt_dir / tag
     ckpt_path.mkdir(parents=True, exist_ok=True)
-    ocp.StandardCheckpointer().save(str(ckpt_path), params, force=True)
+    checkpointer = ocp.StandardCheckpointer()
+    checkpointer.save(str(ckpt_path), params, force=True)
+    checkpointer.wait_until_finished()
+    checkpointer.close()
     return ckpt_path
 
 
@@ -292,11 +306,11 @@ def main():
     rng, env_rng = jax.random.split(rng)
     env_state = reset_fn(jax.random.split(env_rng, args.num_envs), trajectory_data)
 
-    state_dim, privileged_dim, action_dim = dims
+    proprio_dim, dif_dim, action_dim = dims
     buffer = DAggerBuffer(
         max_size=args.buffer_size,
-        state_dim=state_dim,
-        privileged_dim=privileged_dim,
+        proprio_dim=proprio_dim,
+        dif_dim=dif_dim,
         action_dim=action_dim,
     )
 
@@ -315,27 +329,20 @@ def main():
                  args.num_iterations, args.collect_steps, args.grad_updates_per_iter)
 
     for iteration in range(args.num_iterations):
-        # Collect data with student policy (DAgger)
-        # Roll out student in env, query teacher for labels
+        # ── DAgger collection: posterior rollout of the STUDENT, labeled by the TEACHER ──
         for _ in range(args.collect_steps):
             rng, step_rng, teacher_rng = jax.random.split(rng, 3)
 
-            # Get current observations
-            states = env_state.obs["state"]          # (num_envs, state_dim)
-            privileged = env_state.obs["privileged_state"]  # (num_envs, privileged_dim)
+            # Split observation: proprio -> prior/decoder, dif -> encoder, full state -> teacher.
+            proprio = env_state.obs["proprio_state"]   # (num_envs, proprio_dim)
+            dif = env_state.obs["dif_state"]           # (num_envs, dif_dim)
 
-            # Query teacher for action labels
+            # Teacher labels the current state (its actor consumes obs["state"]).
             teacher_actions = get_teacher_action(env_state.obs, teacher_rng)
+            buffer.add(np.array(proprio), np.array(dif), np.array(teacher_actions))
 
-            # Add to buffer
-            buffer.add(
-                np.array(states),
-                np.array(privileged),
-                np.array(teacher_actions),
-            )
-
-            # Step env with student actions using the deployment policy
-            student_actions = get_student_action(vae_params, states, step_rng)
+            # Student steps the env via the posterior path (tracks the reference).
+            student_actions = get_student_action(vae_params, proprio, dif, step_rng)
             env_state = step_fn(env_state, student_actions, trajectory_data)
 
         if buffer.size < args.batch_size:
@@ -345,11 +352,11 @@ def main():
         grad_losses = []
         for _ in range(args.grad_updates_per_iter):
             rng, update_rng = jax.random.split(rng)
-            batch_states, batch_privileged, batch_teacher_actions = buffer.sample(args.batch_size)
+            batch_proprio, batch_dif, batch_teacher_actions = buffer.sample(args.batch_size)
 
             vae_params, opt_state, loss, l_action, l_kl = train_step(
                 vae_params, opt_state,
-                jnp.array(batch_states), jnp.array(batch_privileged), jnp.array(batch_teacher_actions),
+                jnp.array(batch_proprio), jnp.array(batch_dif), jnp.array(batch_teacher_actions),
                 update_rng,
             )
             grad_losses.append((float(loss), float(l_action), float(l_kl)))
