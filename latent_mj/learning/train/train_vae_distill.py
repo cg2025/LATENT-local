@@ -211,8 +211,11 @@ def main():
     logging.info("VAE initialized. Param count: %d",
                  sum(x.size for x in jax.tree_util.tree_leaves(vae_params)))
 
-    #  Optimizer 
-    optimizer = optax.adam(args.learning_rate)
+    #  Optimizer (clip global grad norm to tame KL-loss spikes, then Adam)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(args.learning_rate),
+    )
     opt_state = optimizer.init(vae_params)
 
     #  JIT-compiled training step 
@@ -235,11 +238,16 @@ def main():
         new_params = optax.apply_updates(params, updates)
         return new_params, new_opt_state, loss, l_action, l_kl
 
-    #   teacher inference 
+    #   teacher inference
     @jax.jit
     def get_teacher_action(obs, rng):
         action, _ = teacher_inference_fn(obs, rng)
         return action
+
+    #   student inference
+    @jax.jit
+    def get_student_action(params, states, rng):
+        return vae.apply(params, states, rng, method=VAEPolicy.inference)
 
     #  Environment setup for data collection 
     wrapped_env = wrap_fn(env, episode_length=policy_cfg.episode_length)
@@ -272,9 +280,8 @@ def main():
                  args.num_iterations, args.collect_steps, args.grad_updates_per_iter)
 
     for iteration in range(args.num_iterations):
-        # Collect data with student policy (DAgger) 
+        # Collect data with student policy (DAgger)
         # Roll out student in env, query teacher for labels
-        collect_losses = []
         for _ in range(args.collect_steps):
             rng, step_rng, teacher_rng = jax.random.split(rng, 3)
 
@@ -292,11 +299,8 @@ def main():
                 np.array(teacher_actions),
             )
 
-            # Step env with student actions (sample from prior for exploration)
-            student_rngs = jax.random.split(step_rng, args.num_envs)
-            student_actions = jax.vmap(
-                lambda s, r: vae.apply(vae_params, s[None], jnp.zeros((1, privileged_dim)), r)[0][0]
-            )(states, student_rngs)
+            # Step env with student actions using the deployment policy
+            student_actions = get_student_action(vae_params, states, step_rng)
 
             env_state = step_fn(env_state, student_actions, trajectory_data)
 

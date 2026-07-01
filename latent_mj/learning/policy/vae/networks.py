@@ -18,16 +18,6 @@ import jax.numpy as jnp
 from typing import Sequence, Tuple
 
 
-def make_mlp(hidden_sizes: Sequence[int], activate_final: bool = False):
-    """Build a simple MLP with Sigmoid LU activations."""
-    layers = []
-    for i, size in enumerate(hidden_sizes):
-        layers.append(nn.Dense(size))
-        if i < len(hidden_sizes) - 1 or activate_final:
-            layers.append(nn.silu)
-    return nn.Sequential(layers)
-
-
 class PosteriorEncoder(nn.Module):
     """Encoding (state, motion_target) to (mu, log_sigma) of posterior q(z|s, s̃).
 
