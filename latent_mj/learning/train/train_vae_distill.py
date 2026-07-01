@@ -25,15 +25,13 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import argparse
 import functools
+import json
 import time
-from pathlib import Path
-from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import flax
 from absl import logging
 
 import latent_mj as lmj
@@ -44,10 +42,12 @@ from latent_mj.learning.policy.vae.networks import VAEPolicy, vae_loss
 from brax.training.agents.ppo.networks import make_ppo_networks
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # DAgger replay buffer
+# ─────────────────────────────────────────────────────────────────────────────
 
 class DAggerBuffer:
-    """Simple replay buffer for DAgger distillation data."""
+    """Simple FIFO replay buffer for DAgger distillation data."""
 
     def __init__(self, max_size: int, state_dim: int, privileged_dim: int, action_dim: int):
         self.max_size = max_size
@@ -95,18 +95,11 @@ class DAggerBuffer:
         return self._size
 
 
-
-# Training state
-class VAETrainState(flax.struct.PyTreeNode):
-    params: Any
-    opt_state: Any
-    step: int
-
-
-# Main training function
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teacher_exp_name", type=str, required=True,
                         help="Exp name of the pretrained PPO tracker (teacher)")
@@ -134,15 +127,11 @@ def main():
                         help="Gradient updates per DAgger round")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no_wandb", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    exp_name = args.exp_name or f"vae_{int(time.time())}"
-    ckpt_dir = WANDB_PATH_LOG / "vae" / exp_name / "checkpoints"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    logging.info("JAX devices: %s", jax.devices())
-
-    # Load task config and env 
+def setup_environment(args):
+    """Build the tracking env and report observation/action dims."""
     task_cfg = lmj.registry.get(args.task, "tracking_config")
     env_cfg = task_cfg.env_config
     policy_cfg = task_cfg.policy_config
@@ -151,21 +140,24 @@ def main():
     env = EnvClass(config=env_cfg)
     trajectory_data = env.prepare_trajectory(env_cfg.reference_traj_config.name)
 
-    state_dim = env.observation_size["state"][0]
-    privileged_dim = env.observation_size["privileged_state"][0]
-    action_dim = env.action_size
-
+    dims = (
+        env.observation_size["state"][0],
+        env.observation_size["privileged_state"][0],
+        env.action_size,
+    )
     logging.info("state_dim=%d, privileged_dim=%d, action_dim=%d, latent_dim=%d",
-                 state_dim, privileged_dim, action_dim, args.latent_dim)
+                 dims[0], dims[1], dims[2], args.latent_dim)
+    return env, trajectory_data, task_cfg, policy_cfg, dims
 
-    # Load pretrained teacher (PPO tracker) 
+
+def load_teacher(env, trajectory_data, task_cfg, policy_cfg, args):
+    """Restore the pretrained PPO tracker and return a deterministic inference fn."""
     logging.info("Loading teacher from exp: %s", args.teacher_exp_name)
     teacher_ckpt = lmj.get_latest_ckpt(f"track/{args.teacher_exp_name}")
     if teacher_ckpt is None:
         raise FileNotFoundError(f"No checkpoint found for teacher: {args.teacher_exp_name}")
     logging.info("Teacher checkpoint: %s", teacher_ckpt)
 
-    import json
     config_path = WANDB_PATH_LOG / "track" / args.teacher_exp_name / "checkpoints" / "config.json"
     with open(config_path) as f:
         teacher_config = json.load(f)
@@ -174,8 +166,6 @@ def main():
     teacher_policy_cfg.update(teacher_config["policy_config"])
 
     network_factory = functools.partial(make_ppo_networks, **teacher_policy_cfg.network_factory)
-
-    # Restore teacher policy
     make_teacher_fn, teacher_params, _ = ppo.train(
         environment=env,
         trajectory_data=trajectory_data,
@@ -190,8 +180,12 @@ def main():
     )
     teacher_inference_fn = make_teacher_fn(teacher_params, deterministic=True)
     logging.info("Teacher loaded successfully.")
+    return teacher_inference_fn
 
-    #  Build student VAE policy 
+
+def build_student(dims, args, rng):
+    """Construct the VAE policy and initialize its parameters."""
+    state_dim, privileged_dim, action_dim = dims
     vae = VAEPolicy(
         state_dim=state_dim,
         privileged_dim=privileged_dim,
@@ -201,24 +195,26 @@ def main():
         decoder_hidden=(512, 256, 128),
         prior_hidden=(256, 128),
     )
-
-    rng = jax.random.PRNGKey(args.seed)
-    rng, init_rng = jax.random.split(rng)
-
+    rng, param_rng, sample_rng = jax.random.split(rng, 3)
     dummy_state = jnp.zeros((1, state_dim))
     dummy_privileged = jnp.zeros((1, privileged_dim))
-    vae_params = vae.init(init_rng, dummy_state, dummy_privileged, init_rng)
+    vae_params = vae.init(param_rng, dummy_state, dummy_privileged, sample_rng)
     logging.info("VAE initialized. Param count: %d",
                  sum(x.size for x in jax.tree_util.tree_leaves(vae_params)))
+    return vae, vae_params, rng
 
-    #  Optimizer (clip global grad norm to tame KL-loss spikes, then Adam)
+
+def make_optimizer(vae_params, learning_rate):
+    """Adam with global-norm gradient clipping to tame KL-loss spikes."""
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adam(args.learning_rate),
+        optax.adam(learning_rate),
     )
-    opt_state = optimizer.init(vae_params)
+    return optimizer, optimizer.init(vae_params)
 
-    #  JIT-compiled training step 
+
+def make_train_step(vae, optimizer, lambda_action, lambda_kl):
+    """Build a jitted single VAE gradient-update step."""
     @jax.jit
     def train_step(params, opt_state, states, privileged, teacher_actions, rng):
         def loss_fn(params):
@@ -228,8 +224,8 @@ def main():
             total, l_action, l_kl = vae_loss(
                 action_pred, teacher_actions,
                 mu, log_sigma, mu_prior, log_sigma_prior,
-                lambda_action=args.lambda_action,
-                lambda_kl=args.lambda_kl,
+                lambda_action=lambda_action,
+                lambda_kl=lambda_kl,
             )
             return total, (l_action, l_kl)
 
@@ -238,26 +234,65 @@ def main():
         new_params = optax.apply_updates(params, updates)
         return new_params, new_opt_state, loss, l_action, l_kl
 
-    #   teacher inference
+    return train_step
+
+
+def make_inference_fns(vae, teacher_inference_fn):
+    """Build jitted teacher (label) and student (deployment) action fns."""
     @jax.jit
     def get_teacher_action(obs, rng):
         action, _ = teacher_inference_fn(obs, rng)
         return action
 
-    #   student inference
     @jax.jit
     def get_student_action(params, states, rng):
+        # Deployment policy: sample z from the learnable prior P(z|s).
         return vae.apply(params, states, rng, method=VAEPolicy.inference)
 
-    #  Environment setup for data collection 
+    return get_teacher_action, get_student_action
+
+
+def save_checkpoint(ckpt_dir, tag, params):
+    """Save params under ckpt_dir/tag with orbax."""
+    import orbax.checkpoint as ocp
+    ckpt_path = ckpt_dir / tag
+    ckpt_path.mkdir(parents=True, exist_ok=True)
+    ocp.StandardCheckpointer().save(str(ckpt_path), params, force=True)
+    return ckpt_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    args = parse_args()
+
+    exp_name = args.exp_name or f"vae_{int(time.time())}"
+    ckpt_dir = WANDB_PATH_LOG / "vae" / exp_name / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    logging.info("JAX devices: %s", jax.devices())
+
+    # Build env, teacher, student, optimizer, and jitted step fns.
+    env, trajectory_data, task_cfg, policy_cfg, dims = setup_environment(args)
+    teacher_inference_fn = load_teacher(env, trajectory_data, task_cfg, policy_cfg, args)
+
+    rng = jax.random.PRNGKey(args.seed)
+    vae, vae_params, rng = build_student(dims, args, rng)
+    optimizer, opt_state = make_optimizer(vae_params, args.learning_rate)
+
+    train_step = make_train_step(vae, optimizer, args.lambda_action, args.lambda_kl)
+    get_teacher_action, get_student_action = make_inference_fns(vae, teacher_inference_fn)
+
+    # Env for data collection + replay buffer.
     wrapped_env = wrap_fn(env, episode_length=policy_cfg.episode_length)
     reset_fn = jax.jit(wrapped_env.reset)
     step_fn = jax.jit(wrapped_env.step)
 
     rng, env_rng = jax.random.split(rng)
-    env_rngs = jax.random.split(env_rng, args.num_envs)
-    env_state = reset_fn(env_rngs, trajectory_data)
-    # DAgger replay buffer 
+    env_state = reset_fn(jax.random.split(env_rng, args.num_envs), trajectory_data)
+
+    state_dim, privileged_dim, action_dim = dims
     buffer = DAggerBuffer(
         max_size=args.buffer_size,
         state_dim=state_dim,
@@ -301,38 +336,30 @@ def main():
 
             # Step env with student actions using the deployment policy
             student_actions = get_student_action(vae_params, states, step_rng)
-
             env_state = step_fn(env_state, student_actions, trajectory_data)
 
-        # Gradient updates on buffer
         if buffer.size < args.batch_size:
             continue
 
+        # Supervised VAE updates on minibatches sampled from the aggregated buffer
         grad_losses = []
         for _ in range(args.grad_updates_per_iter):
             rng, update_rng = jax.random.split(rng)
             batch_states, batch_privileged, batch_teacher_actions = buffer.sample(args.batch_size)
 
-            batch_states = jnp.array(batch_states)
-            batch_privileged = jnp.array(batch_privileged)
-            batch_teacher_actions = jnp.array(batch_teacher_actions)
-
             vae_params, opt_state, loss, l_action, l_kl = train_step(
                 vae_params, opt_state,
-                batch_states, batch_privileged, batch_teacher_actions,
+                jnp.array(batch_states), jnp.array(batch_privileged), jnp.array(batch_teacher_actions),
                 update_rng,
             )
             grad_losses.append((float(loss), float(l_action), float(l_kl)))
 
-        avg_loss = np.mean([x[0] for x in grad_losses])
-        avg_action_loss = np.mean([x[1] for x in grad_losses])
-        avg_kl_loss = np.mean([x[2] for x in grad_losses])
+        avg_loss, avg_action_loss, avg_kl_loss = np.mean(np.array(grad_losses), axis=0)
 
         logging.info("iter=%d  buffer=%d  loss=%.4f  l_action=%.4f  l_kl=%.4f",
                      iteration, buffer.size, avg_loss, avg_action_loss, avg_kl_loss)
 
         if not args.no_wandb:
-            import wandb
             wandb.log({
                 "iteration": iteration,
                 "buffer_size": buffer.size,
@@ -341,25 +368,14 @@ def main():
                 "loss/kl": avg_kl_loss,
             })
 
-        #  Save checkpoint every 100 iterations 
         if iteration % 100 == 0 and iteration > 0:
-            ckpt_path = ckpt_dir / f"{iteration:08d}"
-            ckpt_path.mkdir(parents=True, exist_ok=True)
-            import orbax.checkpoint as ocp
-            checkpointer = ocp.StandardCheckpointer()
-            checkpointer.save(str(ckpt_path), vae_params, force=True)
+            ckpt_path = save_checkpoint(ckpt_dir, f"{iteration:08d}", vae_params)
             logging.info("Saved checkpoint at iteration %d -> %s", iteration, ckpt_path)
 
-    
-    final_ckpt = ckpt_dir / f"{args.num_iterations:08d}_final"
-    final_ckpt.mkdir(parents=True, exist_ok=True)
-    import orbax.checkpoint as ocp
-    checkpointer = ocp.StandardCheckpointer()
-    checkpointer.save(str(final_ckpt), vae_params, force=True)
+    final_ckpt = save_checkpoint(ckpt_dir, f"{args.num_iterations:08d}_final", vae_params)
     logging.info("Training complete. Final checkpoint: %s", final_ckpt)
 
     if not args.no_wandb:
-        import wandb
         wandb.finish()
 
 
