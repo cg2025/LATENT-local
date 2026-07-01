@@ -1,6 +1,6 @@
 """Online distillation training with variational bottleneck.
 
-Implements Section 3.2.2 of the LATENT paper:
+Implements Section 3.2.2:
   - Loads a pretrained PPO tracker as teacher
   - Trains a student VAE policy via DAgger-style online distillation
   - Student uses encoder-decoder with learnable prior (conditional VAE)
@@ -44,9 +44,7 @@ from latent_mj.learning.policy.vae.networks import VAEPolicy, vae_loss
 from brax.training.agents.ppo.networks import make_ppo_networks
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # DAgger replay buffer
-# ─────────────────────────────────────────────────────────────────────────────
 
 class DAggerBuffer:
     """Simple replay buffer for DAgger distillation data."""
@@ -63,7 +61,7 @@ class DAggerBuffer:
         self._size = 0
 
     def add(self, states, privileged, teacher_actions):
-        """Add a batch of transitions."""
+        """Add batch of transitions."""
         n = states.shape[0]
         if self._ptr + n > self.max_size:
             # Wrap around
@@ -97,17 +95,14 @@ class DAggerBuffer:
         return self._size
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Training state
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Training state
 class VAETrainState(flax.struct.PyTreeNode):
     params: Any
     opt_state: Any
     step: int
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Main training function
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -147,7 +142,7 @@ def main():
 
     logging.info("JAX devices: %s", jax.devices())
 
-    # ── Load task config and env ────────────────────────────────────────────
+    # Load task config and env 
     task_cfg = lmj.registry.get(args.task, "tracking_config")
     env_cfg = task_cfg.env_config
     policy_cfg = task_cfg.policy_config
@@ -163,7 +158,7 @@ def main():
     logging.info("state_dim=%d, privileged_dim=%d, action_dim=%d, latent_dim=%d",
                  state_dim, privileged_dim, action_dim, args.latent_dim)
 
-    # ── Load pretrained teacher (PPO tracker) ───────────────────────────────
+    # Load pretrained teacher (PPO tracker) 
     logging.info("Loading teacher from exp: %s", args.teacher_exp_name)
     teacher_ckpt = lmj.get_latest_ckpt(f"track/{args.teacher_exp_name}")
     if teacher_ckpt is None:
@@ -196,7 +191,7 @@ def main():
     teacher_inference_fn = make_teacher_fn(teacher_params, deterministic=True)
     logging.info("Teacher loaded successfully.")
 
-    # ── Build student VAE policy ─────────────────────────────────────────────
+    #  Build student VAE policy 
     vae = VAEPolicy(
         state_dim=state_dim,
         privileged_dim=privileged_dim,
@@ -216,11 +211,11 @@ def main():
     logging.info("VAE initialized. Param count: %d",
                  sum(x.size for x in jax.tree_util.tree_leaves(vae_params)))
 
-    # ── Optimizer ────────────────────────────────────────────────────────────
+    #  Optimizer 
     optimizer = optax.adam(args.learning_rate)
     opt_state = optimizer.init(vae_params)
 
-    # ── JIT-compiled training step ────────────────────────────────────────────
+    #  JIT-compiled training step 
     @jax.jit
     def train_step(params, opt_state, states, privileged, teacher_actions, rng):
         def loss_fn(params):
@@ -240,13 +235,13 @@ def main():
         new_params = optax.apply_updates(params, updates)
         return new_params, new_opt_state, loss, l_action, l_kl
 
-    # ── JIT-compiled teacher inference ────────────────────────────────────────
+    #   teacher inference 
     @jax.jit
     def get_teacher_action(obs, rng):
         action, _ = teacher_inference_fn(obs, rng)
         return action
 
-    # ── Environment setup for data collection ────────────────────────────────
+    #  Environment setup for data collection 
     wrapped_env = wrap_fn(env, episode_length=policy_cfg.episode_length)
     reset_fn = jax.jit(wrapped_env.reset)
     step_fn = jax.jit(wrapped_env.step)
@@ -254,7 +249,7 @@ def main():
     rng, env_rng = jax.random.split(rng)
     env_rngs = jax.random.split(env_rng, args.num_envs)
     env_state = reset_fn(env_rngs, trajectory_data)
-    # ── DAgger replay buffer ──────────────────────────────────────────────────
+    # DAgger replay buffer 
     buffer = DAggerBuffer(
         max_size=args.buffer_size,
         state_dim=state_dim,
@@ -262,7 +257,6 @@ def main():
         action_dim=action_dim,
     )
 
-    # ── WandB ────────────────────────────────────────────────────────────────
     if not args.no_wandb:
         import wandb
         wandb.init(
@@ -272,13 +266,13 @@ def main():
             config=vars(args),
         )
 
-    # ── Training loop ─────────────────────────────────────────────────────────
+    # Training loop 
     logging.info("Starting VAE distillation training...")
     logging.info("num_iterations=%d, collect_steps=%d, grad_updates=%d",
                  args.num_iterations, args.collect_steps, args.grad_updates_per_iter)
 
     for iteration in range(args.num_iterations):
-        # ── Phase 1: Collect data with student policy (DAgger) ────────────────
+        # Collect data with student policy (DAgger) 
         # Roll out student in env, query teacher for labels
         collect_losses = []
         for _ in range(args.collect_steps):
@@ -306,7 +300,7 @@ def main():
 
             env_state = step_fn(env_state, student_actions, trajectory_data)
 
-        # ── Phase 2: Gradient updates on buffer ───────────────────────────────
+        # Gradient updates on buffer
         if buffer.size < args.batch_size:
             continue
 
@@ -343,7 +337,7 @@ def main():
                 "loss/kl": avg_kl_loss,
             })
 
-        # ── Save checkpoint every 100 iterations ──────────────────────────────
+        #  Save checkpoint every 100 iterations 
         if iteration % 100 == 0 and iteration > 0:
             ckpt_path = ckpt_dir / f"{iteration:08d}"
             ckpt_path.mkdir(parents=True, exist_ok=True)
@@ -352,7 +346,7 @@ def main():
             checkpointer.save(str(ckpt_path), vae_params, force=True)
             logging.info("Saved checkpoint at iteration %d -> %s", iteration, ckpt_path)
 
-    # ── Final save ────────────────────────────────────────────────────────────
+    
     final_ckpt = ckpt_dir / f"{args.num_iterations:08d}_final"
     final_ckpt.mkdir(parents=True, exist_ok=True)
     import orbax.checkpoint as ocp
