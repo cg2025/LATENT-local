@@ -7,6 +7,8 @@ _CATEGORIES = [
     "tracking_train_env_class",
     "tracking_play_env_class",
     "tracking_config",
+"return_train_env_class",
+    "return_config",
 ]
 
 

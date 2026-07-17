@@ -22,15 +22,30 @@ ROOT_PATH = PATH_ASSET / "unitree_g1"
 
 FLAT_TERRAIN_WO_RACKET_XML = ROOT_PATH / "scene_mjx_flat_terrain.xml"
 FLAT_TERRAIN_W_RACKET_XML = ROOT_PATH / "scene_mjx_racket_wo_ball_flat_terrain.xml"
+FLAT_TERRAIN_W_RACKET_W_BALL_XML = ROOT_PATH / "scene_mjx_racket_w_ball_flat_terrain.xml"
 
 NUM_JOINT = 29
 
-def task_to_xml(with_racket: bool=False) -> Path:
+def task_to_xml(with_racket: bool = False, with_ball: bool = False) -> Path:
+    if with_ball and not with_racket:
+        raise ValueError("with_ball=True requires with_racket=True (no racket-less ball scene exists)")
     xml_map = {
-        (False): FLAT_TERRAIN_WO_RACKET_XML,
-        (True): FLAT_TERRAIN_W_RACKET_XML,
+        (False, False): FLAT_TERRAIN_WO_RACKET_XML,
+        (True, False): FLAT_TERRAIN_W_RACKET_XML,
+        (True, True): FLAT_TERRAIN_W_RACKET_W_BALL_XML,
     }
-    return xml_map[(with_racket)]
+    return xml_map[(with_racket, with_ball)]
+
+
+# Ball body/geom/site names in FLAT_TERRAIN_W_RACKET_W_BALL_XML (see
+# latent_mj/learning/policy/high_level -- LAB -- and envs/g1_tracking/train/
+# ball_launch.py, which this task's env composes together).
+TENNIS_BALL_JOINT = "tennis_ball_freejoint"
+TENNIS_BALL_GEOM = "tennis_ball_geom"
+TENNIS_BALL_SITE = "tennis_ball_site"
+TENNIS_RACKET_COLLISION_GEOM = "tennis_racket_collision"
+TENNIS_RACKET_CENTER_SITE = "tennis_racket_center"
+NET_GEOM = "net"
 
 
 FEET_SITES = [
