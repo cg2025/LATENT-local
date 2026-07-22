@@ -64,6 +64,12 @@ def _unpmap(v):
     return jax.tree_util.tree_map(lambda x: x[0], v)
 
 
+def _device_put_replicated(tree, devices):
+    # Drop-in for the removed jax.device_put_replicated (jax>=0.11).
+    n = len(devices)
+    return jax.tree_util.tree_map(lambda x: jnp.stack([x] * n), tree)
+
+
 def _strip_weak_type(tree):
     # brax user code is sometimes ambiguous about weak_type.  in order to
     # avoid extra jit recompilations we strip all weak types from user input
@@ -516,7 +522,7 @@ def train(
             {},
         )
 
-    training_state = jax.device_put_replicated(training_state, jax.local_devices()[:local_devices_to_use])
+    training_state = _device_put_replicated(training_state, jax.local_devices()[:local_devices_to_use])
 
     # Run initial eval
     training_metrics = {}

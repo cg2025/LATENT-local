@@ -12,7 +12,7 @@ import mujoco
 from mujoco import MjData, mjx
 from mujoco.mjx._src import math
 from mujoco_playground._src import mjx_env
-from mujoco_playground._src.collision import geoms_colliding
+from latent_mj.utils.collision import geoms_colliding
 
 import latent_mj as lmj
 from latent_mj.envs.g1_tracking.train import base_env as g1_base
@@ -535,9 +535,10 @@ class G1TrackingTennisEnv(g1_base.G1Env):
         noisy_init_root_quat = math.quat_mul(yaw_noise_quat, init_traj_data.qpos[3:7])
         noisy_init_qpos = noisy_init_qpos.at[3:7].set(noisy_init_root_quat)
 
-        data = mjx_env.init(
-            self.mjx_model, qpos=noisy_init_qpos, qvel=init_traj_data.qvel, ctrl=noisy_init_qpos[7:]
+        data = mjx_env.make_data(
+            self.mj_model, qpos=noisy_init_qpos, qvel=init_traj_data.qvel, ctrl=noisy_init_qpos[7:]
         )
+        data = mjx.forward(self.mjx_model, data)
 
         traj_no = carry.traj_state.traj_no
 
@@ -674,7 +675,7 @@ class G1TrackingTennisEnv(g1_base.G1Env):
         )
         rewards = self._get_reward(data, traj_data, full_action, motor_targets, torque, state.info)
         rewards = {k: v * rewards[k] for k, v in self._config.reward_config.scales.items()}
-        reward = jp.clip(sum(rewards.values()) * self.dt, a_max=10000.0)
+        reward = jp.clip(sum(rewards.values()) * self.dt, max=10000.0)
 
         for k, v in rewards.items():
             state.metrics[f"reward/{k}"] = v
