@@ -45,24 +45,6 @@ def load_frozen_vae_params(ckpt_path: str | Path, vae: VAEPolicy):
     return params
 
 
-@dataclasses.dataclass
-class LABOutput:
-    """Diagnostics from a single LAB decode call.
-
-    a_body: decoded action for the active (non-wrist) joints, (batch, action_dim)
-    z: the latent code actually fed to the decoder, (batch, latent_dim)
-    mu_p: prior mean at s_t, (batch, latent_dim)
-    sigma_p: prior std at s_t, (batch, latent_dim)
-    tanh_sat: mean |tanh(a_latent)| across the batch and latent dims, in [0, 1].
-        Values near 1.0 indicate the high-level policy is consistently
-        saturating the barrier.
-    """
-    a_body: jnp.ndarray
-    z: jnp.ndarray
-    mu_p: jnp.ndarray
-    sigma_p: jnp.ndarray
-    tanh_sat: jnp.ndarray
-
 
 class LatentActionBarrier:
     """Frozen decoder + learnable prior, exposed as a single decode() call.
@@ -72,7 +54,6 @@ class LatentActionBarrier:
         self.vae = vae
         self.params = params
         self.lam = lam
-        self._decode_fn = jax.jit(self._decode_impl)  # returns tuple
 
     @classmethod
     def from_checkpoint(
@@ -100,8 +81,7 @@ class LatentActionBarrier:
         return cls(vae=vae, params=params, lam=lam)
 
     def _decode_impl(self, proprio: jnp.ndarray, a_latent_residual: jnp.ndarray):
-        # Returns a tuple (not LABOutput) because jax.jit requires the
-        # traced return value to be a registered pytree.
+        
         frozen_params = jax.tree_util.tree_map(jax.lax.stop_gradient, self.params)
         mu_p, log_sigma_p = self.vae.apply(frozen_params, proprio, method=self.vae.prior_params)
         sigma_p = jnp.exp(log_sigma_p)
@@ -112,12 +92,17 @@ class LatentActionBarrier:
         a_body = self.vae.apply(frozen_params, proprio, z, method=self.vae.decode)
         tanh_sat = jnp.mean(jnp.abs(squashed))
 
-        return a_body, z, mu_p, sigma_p, tanh_sat
+        return {
+            "a_body": a_body,
+            "z": z,
+            "mu_p": mu_p,
+            "sigma_p": sigma_p,
+            "tanh_sat": tanh_sat,
+        }
 
     def decode(self, proprio: jnp.ndarray, a_latent_residual: jnp.ndarray) -> LABOutput:
         """Eq. 4 decode. Batched: proprio (B, proprio_dim), a_latent_residual (B, latent_dim)."""
-        a_body, z, mu_p, sigma_p, tanh_sat = self._decode_fn(proprio, a_latent_residual)
-        return LABOutput(a_body=a_body, z=z, mu_p=mu_p, sigma_p=sigma_p, tanh_sat=tanh_sat)
+        return self._decode_impl(proprio, a_latent_residual)
 
     def decode_deterministic(self, proprio: jnp.ndarray) -> LABOutput:
         """a_latent_residual = 0 -> z = mu_p (prior mean)."""
