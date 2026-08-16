@@ -278,7 +278,7 @@ def train(
 
     key_envs = jax.random.split(key_env, num_envs // process_count)
     key_envs = jnp.reshape(key_envs, (local_devices_to_use, -1) + key_envs.shape[1:])
-    if trajectory_data is None:
+    if trajectory_data is None and hasattr(env.unwrapped, "th"):
         trajectory_data = env.unwrapped.th.traj.data
     reset_fn = jax.jit(jax.vmap(env.reset, in_axes=(0, None)))
     env_state = reset_fn(key_envs, trajectory_data)

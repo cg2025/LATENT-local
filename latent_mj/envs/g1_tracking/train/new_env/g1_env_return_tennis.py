@@ -20,8 +20,8 @@ from mujoco_playground._src import mjx_env
 import latent_mj as lmj
 from latent_mj.envs.g1_tracking.train import base_env as g1_base
 from latent_mj.envs.g1_tracking import g1_tracking_constants_tennis as consts
-from latent_mj.envs.g1_tracking.train import ball_launch as bl
-from latent_mj.envs.g1_tracking.train import sample_ball_launch_nn as bln
+from latent_mj.envs.g1_tracking.train.new_env import train_ball_launch as bl
+from latent_mj.envs.g1_tracking.train.new_env import sample_ball_launch_nn as bln
 from latent_mj.learning.policy.high_level.latent_action_barrier import LatentActionBarrier
 from latent_mj.utils.dataset.traj_class import Trajectory, TrajectoryData
 
@@ -184,7 +184,7 @@ def g1_return_tennis_task_config() -> config_dict.ConfigDict:
         num_minibatches=32,
         num_updates_per_batch=4,
         num_resets_per_eval=0,
-        normalize_observations=False,
+        normalize_observations=True,
         reward_scaling=1.0,
         clipping_epsilon=0.2,
         gae_lambda=0.95,
@@ -311,7 +311,7 @@ class G1TennisReturnEnv(g1_base.G1Env):
         self._lab = LatentActionBarrier.from_checkpoint(
             ckpt_path=cfg.vae_checkpoint_path,
             proprio_dim=self._proprio_dim(),
-            dif_dim=1,  
+            dif_dim=58,  # dif_joint_pos(29) + dif_joint_vel(29), matches Stage 2 training
             action_dim=cfg.vae_action_dim,
             latent_dim=cfg.latent_dim,
             lam=cfg.lab_lambda,
@@ -470,7 +470,9 @@ class G1TennisReturnEnv(g1_base.G1Env):
         state.info["rng"], rng_step = jax.random.split(state.info["rng"])
 
         a_latent = action[: cfg.latent_dim]
-        a_correct = action[cfg.latent_dim :]
+        a_correct_raw = action[cfg.latent_dim :]
+        wrist_limit = self._config.reward_config.auxiliary.wrist_correction_limit
+        a_correct = 1.5 * wrist_limit * jp.tanh(a_correct_raw)
 
         proprio = self._proprio_from_data(state.data, state.info)
         lab_out = self._lab.decode(proprio[None, :], a_latent[None, :])
@@ -588,7 +590,7 @@ class G1TennisReturnEnv(g1_base.G1Env):
             racket_pos - root_pos,          # racket_pos_rel
             racket_linvel,
         ])
-        return jp.nan_to_num(state)
+        return {"state": jp.nan_to_num(state)}
 
     # ------------------------------------------------------------------ #
     # Reward (Table 1). 

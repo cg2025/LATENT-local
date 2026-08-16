@@ -15,3 +15,4 @@
 
 from latent_mj.envs.g1_tracking.train import g1_env_tracking_tennis, g1_env_tracking_tennis_dr
 from latent_mj.envs.g1_tracking.play import play_g1_env_tracking_tennis
+from latent_mj.envs.g1_tracking.train.new_env import g1_env_return_tennis

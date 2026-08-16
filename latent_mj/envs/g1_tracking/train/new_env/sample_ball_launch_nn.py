@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import train_ball_launch as bl
+from latent_mj.envs.g1_tracking.train.new_env import train_ball_launch as bl
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 

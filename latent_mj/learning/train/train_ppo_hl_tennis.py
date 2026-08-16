@@ -1,0 +1,175 @@
+"""Train G1 high-level tennis-return policy via PPO.
+
+The high-level policy outputs [a_latent, a_correct] each step; the
+LatentActionBarrier + frozen VAE decoder (loaded inside G1TennisReturnEnv)
+turn that into low-level joint targets.
+
+Usage:
+    python -m latent_mj.learning.train.train_ppo_hl_tennis \
+        --exp_name my_first_hl_run \
+        --vae_checkpoint_path /path/to/stage2/checkpoints/final
+"""
+
+import os
+os.environ["MUJOCO_GL"] = "egl"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+import argparse
+import functools
+import json
+import time
+
+import jax
+from absl import logging
+
+import latent_mj as lmj
+from latent_mj.constant import WANDB_PATH_LOG
+from latent_mj.envs.g1_tracking.utils.wrapper import wrap_fn
+from latent_mj.learning.policy.ppo import train_tracking as ppo
+from brax.training.agents.ppo.networks import make_ppo_networks
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", type=str, default="G1ReturnTennis")
+    parser.add_argument("--exp_name", type=str, default="")
+    parser.add_argument(
+        "--vae_checkpoint_path", type=str, required=True,
+        help="Path to the frozen Stage-2 VAE checkpoint (train_vae_distill.py output).",
+    )
+    parser.add_argument(
+        "--lab_lambda", type=float, default=None,
+        help="Override Latent Action Barrier scale factor (paper leaves this unspecified).",
+    )
+    parser.add_argument("--num_envs", type=int, default=4096)
+    parser.add_argument("--num_minibatches", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--num_updates_per_batch", type=int, default=4)
+    parser.add_argument("--num_timesteps", type=int, default=None)
+    parser.add_argument("--num_evals", type=int, default=None,
+                        help="Number of evals (periodic checkpoints + reward logging)")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--no_wandb", action="store_true")
+    parser.add_argument("--restore_exp_name", type=str, default=None)
+    args = parser.parse_args()
+
+    exp_name = args.exp_name or f"hl_tennis_{int(time.time())}"
+    ckpt_dir = WANDB_PATH_LOG / "return" / exp_name / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load config and env
+    task_cfg = lmj.registry.get(args.task, "return_config")
+    env_cfg = task_cfg.env_config
+    policy_cfg = task_cfg.policy_config
+
+    # add vae checkpoint
+    env_cfg.vae_checkpoint_path = args.vae_checkpoint_path
+    if args.lab_lambda is not None:
+        env_cfg.lab_lambda = args.lab_lambda
+
+    # Apply CLI overrides to policy_cfg before saving
+    policy_cfg.num_envs = args.num_envs
+    policy_cfg.batch_size = args.batch_size
+    policy_cfg.num_minibatches = args.num_minibatches
+    policy_cfg.num_updates_per_batch = args.num_updates_per_batch
+    if args.num_timesteps is not None:
+        policy_cfg.num_timesteps = args.num_timesteps
+    if args.num_evals is not None:
+        policy_cfg.num_evals = args.num_evals
+
+    # Save config for eval/export scripts
+    def _to_serializable(v):
+        if hasattr(v, "to_dict"):
+            return {k2: _to_serializable(v2) for k2, v2 in v.to_dict().items()}
+        if isinstance(v, tuple):
+            return list(v)
+        return v
+
+    with open(ckpt_dir / "config.json", "w") as f:
+        json.dump({
+            "env_config": env_cfg.to_dict(),
+            "policy_config": {
+                k: _to_serializable(v) for k, v in policy_cfg.items()
+                if k not in ("progress_fn", "wrap_env_fn", "randomization_fn")
+            },
+        }, f, indent=2)
+
+    EnvClass = lmj.registry.get(args.task, "return_train_env_class")
+    env = EnvClass(config=env_cfg)
+    trajectory_data = None
+
+    # Network factory
+    network_factory = functools.partial(make_ppo_networks, **policy_cfg.network_factory)
+
+    # WandB
+    if not args.no_wandb:
+        import wandb
+        wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "latent"),
+            entity=os.environ.get("WANDB_ENTITY", None),
+            name=exp_name,
+        )
+
+    def progress_fn(step, metrics):
+        flat = {k: float(v) for k, v in metrics.items()}
+        reward = flat.get("Average sum_reward", float("nan"))
+        logging.info("step=%d  reward=%.3f", step, reward)
+        if not args.no_wandb:
+            import wandb
+            wandb.log({"step": step, **flat}, step=step)
+
+    def policy_params_fn(step, make_policy, params):
+        logging.info("Checkpoint at step %d -> %s", step, ckpt_dir / str(step))
+
+    # Restore checkpoint nfor  prev HL run 
+    restore_ckpt = None
+    if args.restore_exp_name:
+        # get_latest_ckpt needs the
+        # full nested tag or it finds nothing and resumes from scratch.
+        restore_ckpt = lmj.get_latest_ckpt(f"return/{args.restore_exp_name}")
+
+    logging.info("JAX devices: %s", jax.devices())
+    logging.info("Starting training: exp=%s  vae_ckpt=%s", exp_name, args.vae_checkpoint_path)
+
+    make_policy, params, metrics = ppo.train(
+        environment=env,
+        trajectory_data=trajectory_data,
+        num_timesteps=policy_cfg.num_timesteps,
+        max_devices_per_host=policy_cfg.max_devices_per_host,
+        num_envs=policy_cfg.num_envs,
+        episode_length=policy_cfg.episode_length,
+        action_repeat=policy_cfg.action_repeat,
+        wrap_env=True,
+        wrap_env_fn=wrap_fn,
+        randomization_fn=None,
+        learning_rate=policy_cfg.learning_rate,
+        entropy_cost=policy_cfg.entropy_cost,
+        discounting=policy_cfg.discounting,
+        unroll_length=policy_cfg.unroll_length,
+        batch_size=policy_cfg.batch_size,
+        num_minibatches=policy_cfg.num_minibatches,
+        num_updates_per_batch=policy_cfg.num_updates_per_batch,
+        normalize_observations=policy_cfg.normalize_observations,
+        reward_scaling=policy_cfg.reward_scaling,
+        clipping_epsilon=policy_cfg.clipping_epsilon,
+        gae_lambda=policy_cfg.gae_lambda,
+        max_grad_norm=policy_cfg.max_grad_norm,
+        normalize_advantage=policy_cfg.normalize_advantage,
+        network_factory=network_factory,
+        seed=args.seed,
+        num_evals=policy_cfg.num_evals,
+        log_training_metrics=True,
+        progress_fn=progress_fn,
+        policy_params_fn=policy_params_fn,
+        save_checkpoint_path=str(ckpt_dir),
+        restore_checkpoint_path=str(restore_ckpt) if restore_ckpt else None,
+    )
+
+    logging.info("Training complete. metrics: %s", metrics)
+    if not args.no_wandb:
+        import wandb
+        wandb.finish()
+
+
+if __name__ == "__main__":
+    main()
