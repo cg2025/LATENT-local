@@ -28,6 +28,7 @@ class State:
     info: dict
     obs: dict
 
+@lmj.registry.register("G1TrackingTennisXsens", "tracking_play_env_class")
 @lmj.registry.register("G1TrackingTennis", "tracking_play_env_class")
 class PlayG1TrackingTennisEnv:
     mj_model: mujoco.MjModel

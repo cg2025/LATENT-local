@@ -1308,3 +1308,16 @@ class G1TrackingTennisEnv(g1_base.G1Env):
         qacc = (qvel - last_vel_active) / self.dt
         cost = jp.sum(0.02 * jp.square(qvel) + jp.square(qacc))
         return cost
+
+
+# Same task on the Xsens S16 tennis retarget (scripts/process_motion/xsens_npz_to_latent.py).
+def g1_tracking_tennis_xsens_task_config() -> config_dict.ConfigDict:
+    config = g1_tracking_tennis_task_config()
+    config.env_config.reference_traj_config.name = {
+        "Tennis/xsens_s16": sorted(consts.TENNIS_XSENS_S16_DATASET_ALL),
+    }
+    return config
+
+
+lmj.registry.register("G1TrackingTennisXsens", "tracking_config")(g1_tracking_tennis_xsens_task_config())
+lmj.registry.register("G1TrackingTennisXsens", "tracking_train_env_class")(G1TrackingTennisEnv)

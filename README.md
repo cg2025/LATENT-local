@@ -116,6 +116,12 @@ The motion tracker training pipeline is based on [OpenTrack](https://github.com/
   </table>
 
 
+### Xsens S16 tennis retarget
+
+  `scripts/process_motion/xsens_npz_to_latent.py` converts the qpos-only release `tennis_s16_g1_v1.npz` (60 Hz) into one LATENT `.npz` per clip under `storage/data/mocap/Tennis/xsens_s16/`, resampled to 50 Hz with FK and velocities from the no-racket model, so no preprocess step is needed.
+  The 82 clips are listed in `consts.TENNIS_XSENS_S16_DATASET_ALL` and loaded by the `G1TrackingTennisXsens` task.
+  Convert with `python scripts/process_motion/xsens_npz_to_latent.py --npz <path/to/tennis_s16_g1_v1.npz>`, then train with `sbatch scripts/submit_track_xsens.sbatch`.
+
 ### Train the model
 
    ```bash
