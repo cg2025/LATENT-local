@@ -1,0 +1,3 @@
+cpu-bind=MASK - gpu20-2.drl, task  0  0 [2068993]: mask 0xc000000001800000 set
+gpu20-2.drl.csail.mit.edu
+100 pool1000
